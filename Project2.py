@@ -213,7 +213,7 @@ def get_best_move(board, player):
             depth += 1
             
     except TimeoutException:
-        # Time ran out! We silently catch this and return the best_move 
+        # Time ran out! We catch this and return the best_move 
         # from the highest completely finished depth.
         pass 
         
