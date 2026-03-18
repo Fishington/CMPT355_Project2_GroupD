@@ -3,7 +3,7 @@ import random
 import copy
 
 # --- SETTINGS ---
-THINKING_TIME = 6.0  # 6 seconds per turn
+THINKING_TIME = 10.0  # 6 seconds per turn
 
 class TimeoutException(Exception):
     pass
@@ -119,11 +119,13 @@ def evaluate_board(board, player):
     if my_moves == 0: return -10000
     return my_moves - opp_moves
 
-def minimax(board, depth, alpha, beta, is_maximizing, current_player, original_player, start_time):
+def minimax(board, depth, alpha, beta, is_maximizing, current_player, original_player, start_time, stats):
     # Check for timeout at the start of each minimax call. 
     # If we've exceeded our time limit, we raise a TimeoutException which will be caught in get_best_move.
     if time.time() - start_time > THINKING_TIME:
         raise TimeoutException()
+    
+    stats['nodes_evaluated'] += 1
 
     moves = get_legal_moves(board, current_player)
     
@@ -144,7 +146,7 @@ def minimax(board, depth, alpha, beta, is_maximizing, current_player, original_p
             apply_move(new_board, move, current_player)
             
             # We recursively call minimax for the child node, flipping the is_maximizing flag and switching the current player.
-            eval_score, _ = minimax(new_board, depth - 1, alpha, beta, False, next_player, original_player, start_time)
+            eval_score, _ = minimax(new_board, depth - 1, alpha, beta, False, next_player, original_player, start_time, stats)
             
             # If the score from this child node is better than our current best score, we update max_eval and best_move.
             if eval_score > max_eval:
@@ -153,7 +155,9 @@ def minimax(board, depth, alpha, beta, is_maximizing, current_player, original_p
             
             # Alpha-beta pruning: we update alpha and check if we can prune the remaining branches.
             alpha = max(alpha, eval_score)
-            if beta <= alpha: break
+            if beta <= alpha: 
+                stats['cutoffs'] += 1 # A-B Pruning
+                break
         return max_eval, best_move
     else:
         # Same logic as above but we want to minimize the score for the opponent, so we look for the lowest score among the child nodes.
@@ -161,13 +165,15 @@ def minimax(board, depth, alpha, beta, is_maximizing, current_player, original_p
         for move in moves:
             new_board = clone_board(board)
             apply_move(new_board, move, current_player)
-            eval_score, _ = minimax(new_board, depth - 1, alpha, beta, True, next_player, original_player, start_time)
+            eval_score, _ = minimax(new_board, depth - 1, alpha, beta, True, next_player, original_player, start_time, stats)
             
             if eval_score < min_eval:
                 min_eval = eval_score
                 best_move = move
             beta = min(beta, eval_score)
-            if beta <= alpha: break
+            if beta <= alpha: 
+                stats['cutoffs'] += 1 # A-B Pruning
+                break
         return min_eval, best_move
 
 def get_best_move(board, player, debug_thinking=True):
@@ -180,6 +186,11 @@ def get_best_move(board, player, debug_thinking=True):
     
     last_completed_evals =[]
     last_completed_depth = 0
+    
+    stats = {
+        'nodes_evaluated': 0,
+        'cutoffs': 0
+    }
     
     try:
         while True:
@@ -202,7 +213,7 @@ def get_best_move(board, player, debug_thinking=True):
                 apply_move(new_board, move, player)
                 
                 # Pass into standard minimax for the rest of the depth
-                score, _ = minimax(new_board, depth - 1, alpha, beta, False, next_player, player, start_time)
+                score, _ = minimax(new_board, depth - 1, alpha, beta, False, next_player, player, start_time, stats)
                 
                 move_scores.append((move, score))
                 
@@ -222,10 +233,18 @@ def get_best_move(board, player, debug_thinking=True):
             
     except TimeoutException:
         pass # Time ran out, we will just print the last fully completed depth
+    
+    
+    time_taken = time.time() - start_time
         
     if debug_thinking and last_completed_evals:
         print(f"\n[THOUGHT PROCESS (Depth {last_completed_depth})]")
         print("   [Heuristic: Net Mobility (+ is good for Black)]")
+        print(f"   Nodes Evaluated: {stats['nodes_evaluated']} | Alpha-Beta Cutoffs: {stats['cutoffs']}")
+        print(f"   Time Taken: {time.time() - start_time:.2f} seconds (Time Limit: {THINKING_TIME} seconds)")
+        
+        nps = int(stats['nodes_evaluated'] / time_taken) if time_taken > 0 else 0
+        print(f"  Search Speed      : {nps:,} nodes/sec")
         
         # Sort the moves from Best to Worst
         sorted_evals = sorted(last_completed_evals, key=lambda x: x[1], reverse=True)
