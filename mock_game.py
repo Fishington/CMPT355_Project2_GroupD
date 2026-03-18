@@ -268,9 +268,36 @@ def play_mock_game():
     print("Black (B): Minimax AI")
     print("White (W): Random Player\n")
     
-    board = create_initial_board()
-    current_player = 'B'
-    turn_number = 1
+    USE_CUSTOM_BOARD = True  # Set to True to use a custom board state for testing, False for standard game start
+    
+    if USE_CUSTOM_BOARD:
+        # Define your custom board state here. 
+        # 'B' = Black, 'W' = White, 'O' = Empty
+        # This example is the board exactly after Black's first turn (D5 removed)
+        custom_board_str =[
+            "BWBWBWBW", # Rank 8 (Index 0)
+            "WBWBWBWB", # Rank 7
+            "BWBWBWBW", # Rank 6
+            "WBWBOOWB", # Rank 5
+            "BWBOBWBW", # Rank 4
+            "WBWOWBWB", # Rank 3
+            "BWBWBWBW", # Rank 2
+            "WBWBWBWB"  # Rank 1 (Index 7)
+        ]
+        # Convert the list of strings into a 2D list of characters
+        board =[list(row) for row in custom_board_str]
+        
+        # NOTE: If you set up a mid-game board, make sure you set whose turn it is!
+        # Since Black already moved in this custom board, White goes next.
+        current_player = 'B' 
+        turn_number = 4
+        
+    else:
+        # Standard Game Start
+        board = create_initial_board()
+        current_player = 'B'
+        turn_number = 1
+    # -----------------------------
     
     while True:
         print(f"--- Turn {turn_number} ---")
