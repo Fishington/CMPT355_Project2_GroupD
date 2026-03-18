@@ -8,6 +8,7 @@
 #include <thread>
 #include <random>
 #include <array>
+#include <future>
 
 // --- SETTINGS ---
 const double THINKING_TIME = 10.0;  // 6 seconds per turn
@@ -272,6 +273,14 @@ std::string format_with_commas(long long value) {
     return s;
 }
 
+
+
+struct AsyncResult {
+    Move move;
+    int score;
+    Stats stats;
+};
+
 Move get_best_move(const Board& board, char player, bool debug_thinking = true) {
     auto start_time = std::chrono::high_resolution_clock::now();
     auto legal_moves = get_legal_moves(board, player);
@@ -283,43 +292,56 @@ Move get_best_move(const Board& board, char player, bool debug_thinking = true) 
     std::vector<std::pair<Move, int>> last_completed_evals;
     int last_completed_depth = 0;
     
-    Stats stats;
+    Stats global_stats; // Accumulates stats from all fully completed depths
     
     try {
         while (true) {
-            // --- TOP LEVEL LOOP (For Visualization) ---
-            // We manually do the top layer of Minimax here so we can record 
-            // the score of every single possible move at this depth.
-            
-            std::vector<std::pair<Move, int>> move_scores;
-            int alpha = -1e9;
-            int beta = 1e9;
-            int max_eval = -1e9;
-            Move current_best_move = legal_moves[0];
+            std::vector<std::future<AsyncResult>> futures;
             char next_player = (player == 'B') ? 'W' : 'B';
             
+            // --- MULTITHREADED TOP LEVEL ---
             for (const auto& move : legal_moves) {
-                if (get_elapsed(start_time) > THINKING_TIME) {
-                    throw TimeoutException();
-                }
+                // Launch a parallel thread for each top-level move
+                futures.push_back(std::async(std::launch::async,[board, move, depth, next_player, player, start_time]() {
+                    Stats local_stats;
+                    Board new_board = clone_board(board);
+                    apply_move(new_board, move, player);
                     
-                Board new_board = clone_board(board);
-                apply_move(new_board, move, player);
-                
-                // Pass into standard minimax for the rest of the depth
-                auto [score, _] = minimax(new_board, depth - 1, alpha, beta, false, next_player, player, start_time, stats);
-                
-                move_scores.push_back({move, score});
-                
-                if (score > max_eval) {
-                    max_eval = score;
-                    current_best_move = move;
-                }
-                
-                alpha = std::max(alpha, score);
+                    // Alpha and Beta bounds must start fresh for every independent thread
+                    int alpha = -1e9;
+                    int beta = 1e9;
+                    
+                    auto [score, _] = minimax(new_board, depth - 1, alpha, beta, false, next_player, player, start_time, local_stats);
+                    
+                    return AsyncResult{move, score, local_stats};
+                }));
             }
+            
+            std::vector<std::pair<Move, int>> move_scores;
+            int max_eval = -1e9;
+            Move current_best_move = legal_moves[0];
+            Stats depth_stats;
+            
+            // Collect the results as threads finish. 
+            // If time runs out, fut.get() will re-throw the TimeoutException.
+            for (auto& fut : futures) {
+                AsyncResult result = fut.get(); 
                 
-            // If we successfully evaluated all moves without timing out, save them
+                depth_stats.nodes_evaluated += result.stats.nodes_evaluated;
+                depth_stats.cutoffs += result.stats.cutoffs;
+                
+                move_scores.push_back({result.move, result.score});
+                
+                if (result.score > max_eval) {
+                    max_eval = result.score;
+                    current_best_move = result.move;
+                }
+            }
+            
+            // If we successfully evaluated all moves without timing out:
+            global_stats.nodes_evaluated += depth_stats.nodes_evaluated;
+            global_stats.cutoffs += depth_stats.cutoffs;
+            
             best_move = current_best_move;
             last_completed_evals = move_scores;
             last_completed_depth = depth;
@@ -328,7 +350,9 @@ Move get_best_move(const Board& board, char player, bool debug_thinking = true) 
             depth++;
         }
     } catch (const TimeoutException&) {
-        // Time ran out, we will just print the last fully completed depth
+        // Time ran out. 
+        // Note: The destructors of the remaining std::futures will briefly block 
+        // until the remaining threads also hit the timeout logic and exit cleanly.
     }
     
     double time_taken = get_elapsed(start_time);
@@ -336,12 +360,12 @@ Move get_best_move(const Board& board, char player, bool debug_thinking = true) 
     if (debug_thinking && !last_completed_evals.empty()) {
         std::cout << "\n[THOUGHT PROCESS (Depth " << last_completed_depth << ")]\n";
         std::cout << "   [Heuristic: Net Mobility (+ is good for Black)]\n";
-        std::cout << "   Nodes Evaluated: " << format_with_commas(stats.nodes_evaluated) 
-                  << " | Alpha-Beta Cutoffs: " << format_with_commas(stats.cutoffs) << "\n";
+        std::cout << "   Nodes Evaluated: " << format_with_commas(global_stats.nodes_evaluated) 
+                  << " | Alpha-Beta Cutoffs: " << format_with_commas(global_stats.cutoffs) << "\n";
         std::cout << std::fixed << std::setprecision(2);
         std::cout << "   Time Taken: " << time_taken << " seconds (Time Limit: " << THINKING_TIME << " seconds)\n";
         
-        long long nps = (time_taken > 0) ? static_cast<long long>(stats.nodes_evaluated / time_taken) : 0;
+        long long nps = (time_taken > 0) ? static_cast<long long>(global_stats.nodes_evaluated / time_taken) : 0;
         std::cout << "  Search Speed      : " << format_with_commas(nps) << " nodes/sec\n";
         
         // Sort the moves from Best to Worst
@@ -354,7 +378,7 @@ Move get_best_move(const Board& board, char player, bool debug_thinking = true) 
             int s = eval.second;
             std::string score_str;
             
-            // Format the 
+            // Format the scores clearly
             if (s >= 9000) score_str = "WINNING TRAP FOUND!";
             else if (s <= -9000) score_str = "AVOIDING LOSS!";
             else {
