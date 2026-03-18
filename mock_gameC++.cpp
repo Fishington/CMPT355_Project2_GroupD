@@ -7,22 +7,26 @@
 #include <iomanip>
 #include <thread>
 #include <random>
-#include <array>
 #include <future>
+#include <cstdint> // Added for uint64_t
 
 // --- SETTINGS ---
 const double THINKING_TIME = 10.0;  // 6 seconds per turn
 
 class TimeoutException : public std::exception {};
 
-using Board = std::array<std::array<char, 8>, 8>;
+// OPTIMIZATION: The Board is now just two 64-bit integers instead of an 8x8 array.
+// Each bit (0 to 63) represents a square. Bit 0 is A8, Bit 63 is H1.
+struct Board {
+    uint64_t b = 0; // Black pieces bitboard
+    uint64_t w = 0; // White pieces bitboard
+};
 
 struct Move {
     int start_r = 0, start_c = 0;
     int end_r = 0, end_c = 0;
     bool is_jump = false;
 
-    // OPTIMIZATION: Kept string generation inside the struct. Only triggered when displaying.
     std::string to_string() const {
         auto coords_to_notation =[](int r, int c) {
             char col_char = (char)(c + 'A');
@@ -49,23 +53,24 @@ double get_elapsed(TimePoint start) {
 // --- GAME LOGIC ---
 Board create_initial_board() {
     Board board;
-    for (int r = 0; r < 8; ++r) {
-        for (int c = 0; c < 8; ++c) {
-            board[r][c] = ((r + c) % 2 == 0) ? 'B' : 'W';
-        }
-    }
+    // Magic Hex numbers representing the checkered start state of Konane exactly.
+    board.b = 0xAA55AA55AA55AA55ULL;
+    board.w = 0x55AA55AA55AA55AAULL;
     return board;
 }
 
 void print_board(const Board& board) {
-    // Prints Debug Board with row/column labels and '.' for empty spaces, Makes it easier to visualize compared to lab spec
     std::cout << "   A B C D E F G H\n";
     std::cout << "  -----------------\n";
     for (int r = 0; r < 8; ++r) {
         std::cout << " " << (8 - r) << " |";
         for (int c = 0; c < 8; ++c) {
-            char piece = board[r][c] == 'O' ? '.' : board[r][c];
-            std::cout << piece << (c < 7 ? " " : "");
+            int idx = r * 8 + c;
+            if (board.b & (1ULL << idx)) std::cout << "B";
+            else if (board.w & (1ULL << idx)) std::cout << "W";
+            else std::cout << ".";
+            
+            std::cout << (c < 7 ? " " : "");
         }
         std::cout << "| " << (8 - r) << "\n";
     }
@@ -74,7 +79,6 @@ void print_board(const Board& board) {
 }
 
 std::pair<int, int> notation_to_coords(const std::string& notation) {
-    // Converts from standard chess-like notation (e.g. "D5") to (row, col) indices
     char col_char = toupper(notation[0]);
     char row_char = notation[1];
     int col = col_char - 'A';
@@ -83,59 +87,55 @@ std::pair<int, int> notation_to_coords(const std::string& notation) {
 }
 
 std::string coords_to_notation(int r, int c) {
-    // Converts from (row, col) indices back to standard notation (e.g. (3, 3) -> "D5")
     char col_char = (char)(c + 'A');
     char row_char = std::to_string(8 - r)[0];
     return std::string{col_char, row_char};
 }
 
 Board clone_board(const Board& board) {
-    // Creates a deep copy of the board so we can simulate moves without affecting the original
-    // OPTIMIZATION: C++ std::array copies inherently as a fast memory block
+    // A bitboard copy takes practically 0 clock cycles (just moving 16 bytes)
     return board;
 }
 
 void apply_move(Board& board, const Move& move, char current_player) {
-    // Applies a move to the board. Handles both the opening placement and jump moves.
-    // OPTIMIZATION: We utilize the Move struct to skip string split operations.
+    uint64_t& my_pieces = (current_player == 'B') ? board.b : board.w;
+    uint64_t& opp_pieces = (current_player == 'B') ? board.w : board.b;
     
-    // We use 'O' to represent empty spaces internally for easier processing, but we will print them as '.' for better visualization.
+    int start_idx = move.start_r * 8 + move.start_c;
+    
+    // First turn piece removals
     if (!move.is_jump) { 
-        board[move.start_r][move.start_c] = 'O';
+        my_pieces &= ~(1ULL << start_idx); // Turn off the bit (remove piece)
         return;
     }
 
-    int start_r = move.start_r, start_c = move.start_c;
-    int end_r = move.end_r, end_c = move.end_c;
+    // Applying Jump Masks
+    int dr = (move.end_r == move.start_r) ? 0 : ((move.end_r > move.start_r) ? 1 : -1);
+    int dc = (move.end_c == move.start_c) ? 0 : ((move.end_c > move.start_c) ? 1 : -1);
     
-    int dr = (end_r == start_r) ? 0 : ((end_r > start_r) ? 1 : -1);
-    int dc = (end_c == start_c) ? 0 : ((end_c > start_c) ? 1 : -1);
+    int end_idx = move.end_r * 8 + move.end_c;
+    int delta_idx = dr * 8 + dc; // Flattened 1D directional jump
     
-    int curr_r = start_r, curr_c = start_c;
-    while (curr_r != end_r || curr_c != end_c) {
-        board[curr_r][curr_c] = 'O';
-        curr_r += dr;
-        curr_c += dc;
-        if (curr_r != end_r || curr_c != end_c) {
-            board[curr_r][curr_c] = 'O';
-            curr_r += dr;
-            curr_c += dc;
+    int curr_idx = start_idx;
+    my_pieces &= ~(1ULL << curr_idx); // Remove from start position
+    
+    while (curr_idx != end_idx) {
+        curr_idx += delta_idx;
+        if (curr_idx != end_idx) {
+            opp_pieces &= ~(1ULL << curr_idx); // Remove jumped piece
+            curr_idx += delta_idx;
         }
     }
-    board[end_r][end_c] = current_player;
+    
+    my_pieces |= (1ULL << end_idx); // Add to final position
 }
 
 std::vector<Move> get_legal_moves(const Board& board, char player) {
-    // Returns a list of legal moves for the given player in standard notation (e.g. "D5" for opening, "D5-F5" for jump)
     std::vector<Move> moves;
-    moves.reserve(32); // Preallocate for speed
+    moves.reserve(32); 
     
-    int empty_count = 0;
-    for (int r = 0; r < 8; ++r) {
-        for (int c = 0; c < 8; ++c) {
-            if (board[r][c] == 'O') empty_count++;
-        }
-    }
+    // POPCOUNT: Instantly counts how many pieces exist. 64 minus pieces = empty spaces.
+    int empty_count = 64 - __builtin_popcountll(board.b | board.w);
     
     if (empty_count == 0) {
         if (player == 'B') {
@@ -145,37 +145,47 @@ std::vector<Move> get_legal_moves(const Board& board, char player) {
         return moves;
     } else if (empty_count == 1) {
         if (player == 'W') {
-            if (board[3][4] == 'W') moves.push_back({3, 4, 3, 4, false}); // E5
-            if (board[4][3] == 'W') moves.push_back({4, 3, 4, 3, false}); // D4
+            if (board.w & (1ULL << (3 * 8 + 4))) moves.push_back({3, 4, 3, 4, false}); // E5
+            if (board.w & (1ULL << (4 * 8 + 3))) moves.push_back({4, 3, 4, 3, false}); // D4
         }
         return moves;
     }
 
-    char opp_color = (player == 'B') ? 'W' : 'B';
-    // We check every piece of the current player and see if it can jump in any of the 4 directions.
+    uint64_t my_pieces = (player == 'B') ? board.b : board.w;
+    uint64_t opp_pieces = (player == 'B') ? board.w : board.b;
+    uint64_t empty = ~(board.b | board.w);
+    
     const int directions[4][2] = {{-1, 0}, {1, 0}, {0, -1}, {0, 1}};
     
-    // We will generate all possible jump moves. For each piece, we can potentially have multiple jumps in a row, so we keep jumping in the same direction until we can't anymore.
-    for (int r = 0; r < 8; ++r) {
-        for (int c = 0; c < 8; ++c) {
-            if (board[r][c] == player) {
-                // 
-                for (const auto& dir : directions) {
-                    int dr = dir[0], dc = dir[1];
-                    int curr_r = r, curr_c = c;
-                    while (true) {
-                        int mid_r = curr_r + dr, mid_c = curr_c + dc;
-                        int dest_r = curr_r + 2 * dr, dest_c = curr_c + 2 * dc;
-                        // We check if the destination is on the board, if there's an opponent piece to jump over, and if the landing spot is empty. If all conditions are met, it's a legal move.
-                        if (dest_r >= 0 && dest_r < 8 && dest_c >= 0 && dest_c < 8) {
-                            if (board[mid_r][mid_c] == opp_color && board[dest_r][dest_c] == 'O') {
-                                moves.push_back({r, c, dest_r, dest_c, true});
-                                curr_r = dest_r;
-                                curr_c = dest_c;
-                            } else break;
-                        } else break;
-                    }
-                }
+    uint64_t pieces = my_pieces;
+    
+    // CTZLL: "Count Trailing Zeros". Instantly skips to the next piece on the board!
+    while (pieces) {
+        int idx = __builtin_ctzll(pieces); 
+        pieces &= pieces - 1; // Clear the lowest bit we just processed
+        
+        int r = idx / 8;
+        int c = idx % 8;
+        
+        for (const auto& dir : directions) {
+            int dr = dir[0], dc = dir[1];
+            int curr_r = r, curr_c = c;
+            
+            while (true) {
+                int mid_r = curr_r + dr, mid_c = curr_c + dc;
+                int dest_r = curr_r + 2 * dr, dest_c = curr_c + 2 * dc;
+                
+                if (dest_r >= 0 && dest_r < 8 && dest_c >= 0 && dest_c < 8) {
+                    int mid_idx = mid_r * 8 + mid_c;
+                    int dest_idx = dest_r * 8 + dest_c;
+                    
+                    // Direct Bitmask lookup for Jump Validation
+                    if ((opp_pieces & (1ULL << mid_idx)) && (empty & (1ULL << dest_idx))) {
+                        moves.push_back({r, c, dest_r, dest_c, true});
+                        curr_r = dest_r;
+                        curr_c = dest_c;
+                    } else break;
+                } else break;
             }
         }
     }
@@ -194,10 +204,7 @@ int evaluate_board(const Board& board, char player) {
 }
 
 std::pair<int, Move> minimax(Board board, int depth, int alpha, int beta, bool is_maximizing, char current_player, char original_player, TimePoint start_time, Stats& stats) {
-    // Check for timeout at the start of each minimax call. 
-    // OPTIMIZATION: Only hit the clock every 1024 operations to avoid bogging down the OS.
     if ((stats.nodes_evaluated & 1023) == 0) {
-        // If we've exceeded our time limit, we raise a TimeoutException which will be caught in get_best_move.
         if (get_elapsed(start_time) > THINKING_TIME) {
             throw TimeoutException();
         }
@@ -207,7 +214,6 @@ std::pair<int, Move> minimax(Board board, int depth, int alpha, int beta, bool i
 
     auto moves = get_legal_moves(board, current_player);
     
-    // If we are at depth 0 (leaf node) or there are no legal moves, we evaluate the board and return the score.
     if (depth == 0 || moves.empty()) {
         return {evaluate_board(board, original_player), Move()};
     }
@@ -216,33 +222,26 @@ std::pair<int, Move> minimax(Board board, int depth, int alpha, int beta, bool i
     char next_player = (current_player == 'B') ? 'W' : 'B';
 
     if (is_maximizing) {
-        // We want to maximize the score for the original player, so we look for the highest score among the child nodes.
         int max_eval = -1e9;
         for (const auto& move : moves) {
-            // We create a new board for each child node so we can simulate the move without affecting the current board state.
             Board new_board = clone_board(board);
-            
             apply_move(new_board, move, current_player);
             
-            // We recursively call minimax for the child node, flipping the is_maximizing flag and switching the current player.
             auto[eval_score, _] = minimax(new_board, depth - 1, alpha, beta, false, next_player, original_player, start_time, stats);
             
-            // If the score from this child node is better than our current best score, we update max_eval and best_move.
             if (eval_score > max_eval) {
                 max_eval = eval_score;
                 best_move = move;
             }
             
-            // Alpha-beta pruning: we update alpha and check if we can prune the remaining branches.
             alpha = std::max(alpha, eval_score);
             if (beta <= alpha) {
-                stats.cutoffs++; // A-B Pruning
+                stats.cutoffs++; 
                 break;
             }
         }
         return {max_eval, best_move};
     } else {
-        // Same logic as above but we want to minimize the score for the opponent, so we look for the lowest score among the child nodes.
         int min_eval = 1e9;
         for (const auto& move : moves) {
             Board new_board = clone_board(board);
@@ -255,7 +254,7 @@ std::pair<int, Move> minimax(Board board, int depth, int alpha, int beta, bool i
             }
             beta = std::min(beta, eval_score);
             if (beta <= alpha) {
-                stats.cutoffs++; // A-B Pruning
+                stats.cutoffs++; 
                 break;
             }
         }
@@ -273,8 +272,6 @@ std::string format_with_commas(long long value) {
     return s;
 }
 
-
-
 struct AsyncResult {
     Move move;
     int score;
@@ -291,8 +288,7 @@ Move get_best_move(const Board& board, char player, bool debug_thinking = true) 
     
     std::vector<std::pair<Move, int>> last_completed_evals;
     int last_completed_depth = 0;
-    
-    Stats global_stats; // Accumulates stats from all fully completed depths
+    Stats global_stats; 
     
     try {
         while (true) {
@@ -301,17 +297,15 @@ Move get_best_move(const Board& board, char player, bool debug_thinking = true) 
             
             // --- MULTITHREADED TOP LEVEL ---
             for (const auto& move : legal_moves) {
-                // Launch a parallel thread for each top-level move
                 futures.push_back(std::async(std::launch::async,[board, move, depth, next_player, player, start_time]() {
                     Stats local_stats;
                     Board new_board = clone_board(board);
                     apply_move(new_board, move, player);
                     
-                    // Alpha and Beta bounds must start fresh for every independent thread
                     int alpha = -1e9;
                     int beta = 1e9;
                     
-                    auto [score, _] = minimax(new_board, depth - 1, alpha, beta, false, next_player, player, start_time, local_stats);
+                    auto[score, _] = minimax(new_board, depth - 1, alpha, beta, false, next_player, player, start_time, local_stats);
                     
                     return AsyncResult{move, score, local_stats};
                 }));
@@ -322,14 +316,11 @@ Move get_best_move(const Board& board, char player, bool debug_thinking = true) 
             Move current_best_move = legal_moves[0];
             Stats depth_stats;
             
-            // Collect the results as threads finish. 
-            // If time runs out, fut.get() will re-throw the TimeoutException.
             for (auto& fut : futures) {
                 AsyncResult result = fut.get(); 
                 
                 depth_stats.nodes_evaluated += result.stats.nodes_evaluated;
                 depth_stats.cutoffs += result.stats.cutoffs;
-                
                 move_scores.push_back({result.move, result.score});
                 
                 if (result.score > max_eval) {
@@ -338,7 +329,6 @@ Move get_best_move(const Board& board, char player, bool debug_thinking = true) 
                 }
             }
             
-            // If we successfully evaluated all moves without timing out:
             global_stats.nodes_evaluated += depth_stats.nodes_evaluated;
             global_stats.cutoffs += depth_stats.cutoffs;
             
@@ -346,13 +336,10 @@ Move get_best_move(const Board& board, char player, bool debug_thinking = true) 
             last_completed_evals = move_scores;
             last_completed_depth = depth;
             
-            if (max_eval >= 10000) break; // Found a forced win, stop thinking
+            if (max_eval >= 10000) break; 
             depth++;
         }
     } catch (const TimeoutException&) {
-        // Time ran out. 
-        // Note: The destructors of the remaining std::futures will briefly block 
-        // until the remaining threads also hit the timeout logic and exit cleanly.
     }
     
     double time_taken = get_elapsed(start_time);
@@ -368,7 +355,6 @@ Move get_best_move(const Board& board, char player, bool debug_thinking = true) 
         long long nps = (time_taken > 0) ? static_cast<long long>(global_stats.nodes_evaluated / time_taken) : 0;
         std::cout << "  Search Speed      : " << format_with_commas(nps) << " nodes/sec\n";
         
-        // Sort the moves from Best to Worst
         std::sort(last_completed_evals.begin(), last_completed_evals.end(),[](const auto& a, const auto& b) {
             return a.second > b.second;
         });
@@ -378,7 +364,6 @@ Move get_best_move(const Board& board, char player, bool debug_thinking = true) 
             int s = eval.second;
             std::string score_str;
             
-            // Format the scores clearly
             if (s >= 9000) score_str = "WINNING TRAP FOUND!";
             else if (s <= -9000) score_str = "AVOIDING LOSS!";
             else {
@@ -387,7 +372,6 @@ Move get_best_move(const Board& board, char player, bool debug_thinking = true) 
                 score_str = buf;
             }
             
-            // Highlight the chosen move
             std::string marker = (m.to_string() == best_move.to_string()) ? ">> " : "   ";
             std::cout << "    " << marker << "Move: " << std::left << std::setw(8) << m.to_string() 
                       << " | Score: " << score_str << "\n";
@@ -429,12 +413,9 @@ void play_mock_game() {
             move = get_best_move(board, current_player, true);
         } else {
             std::cout << "White (Random) is picking...\n";
-            // move = get_best_move(board, current_player, false); // For testing AI vs AI, uncomment this and comment out the random move below
-            
             std::uniform_int_distribution<> dist(0, moves.size() - 1);
-            move = moves[dist(gen)]; // Random move for White
-            
-            std::this_thread::sleep_for(std::chrono::seconds(1)); // Pause so you can read the AI's thoughts before the board updates
+            move = moves[dist(gen)];
+            std::this_thread::sleep_for(std::chrono::seconds(1)); 
         }
             
         std::cout << "-> Player " << current_player << " plays: " << move.to_string() << "\n\n";
