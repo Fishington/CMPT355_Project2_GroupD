@@ -3,13 +3,14 @@ import random
 import copy
 
 # --- SETTINGS ---
-THINKING_TIME = 10.0  # 6 seconds per turn
+THINKING_TIME = 10.0  # 10 seconds per turn
 
 class TimeoutException(Exception):
     pass
 
 # --- GAME LOGIC ---
 def create_initial_board():
+    # [8][8] board with 'B' for Black pieces, 'W' for White pieces, and 'O' for empty spaces.
     return [['B' if (r+c)%2==0 else 'W' for c in range(8)] for r in range(8)]
 
 def print_board(board):
@@ -17,7 +18,7 @@ def print_board(board):
     print("   A B C D E F G H")
     print("  -----------------")
     for r in range(8):
-        row_str = " ".join(board[r]).replace('O', '.')
+        row_str = " ".join(board[r]).replace('O', 'O')
         print(f"{8-r} |{row_str}| {8-r}")
     print("  -----------------")
     print("   A B C D E F G H\n")
@@ -120,6 +121,9 @@ def evaluate_board(board, player):
     return my_moves - opp_moves
 
 def minimax(board, depth, alpha, beta, is_maximizing, current_player, original_player, start_time, stats):
+    # Minimax with alpha-beta pruning. Returns (score, best_move) where best_move is only meaningful at the top level of the search.
+    
+    
     # Check for timeout at the start of each minimax call. 
     # If we've exceeded our time limit, we raise a TimeoutException which will be caught in get_best_move.
     if time.time() - start_time > THINKING_TIME:

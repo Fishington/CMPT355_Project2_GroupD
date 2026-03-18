@@ -20,6 +20,12 @@ const double THINKING_TIME = 10.0;  // 10 seconds per turn
 class TimeoutException : public std::exception {};
 
 struct Board {
+    // Bitboard! 
+    // Instead of having a 2D array like char board[8][8], we can use Bitboards
+    // As a standard 64-bit integer uint64_t has exactly 64 bits
+    // b holds all black pieces
+    // w holds all white pieces
+    // Performance is hella good this way, it only takes 1 CPU instruction using bitwise math than compiler functions 
     uint64_t b = 0; 
     uint64_t w = 0; 
 };
@@ -52,6 +58,12 @@ struct Stats {
 };
 
 // --- ZOBRIST HASHING SETUP ---
+// We use Zobrist Hashing to check to see if a board state has already been seen. 
+// So we turn the board into a unique ID (or Hash)
+
+// XOR is incredibly fast and pretty much guarantees a near-unique hash for all board states. Which will be used as a 
+// lookup key for the transposition table
+
 uint64_t zobrist_b[64];
 uint64_t zobrist_w[64];
 uint64_t zobrist_turn;
@@ -84,6 +96,9 @@ uint64_t compute_zobrist(const Board& board, char player) {
 }
 
 // --- GLOBAL SHARED TRANSPOSITION TABLE (LAZY SMP) ---
+
+// When the AI looks ahead, it will encounter the exact same board state through different move orders
+// The TT table stores the evaluation of previously seen boards so no time waste on reclac
 enum class TTFlag : uint8_t { EXACT, LOWERBOUND, UPPERBOUND };
 
 struct TTEntry {
@@ -99,6 +114,9 @@ const int TT_SIZE = 1048576;
 const int LOCKS_SIZE = 4096; // 4096 mutexes prevents Threads from waiting in line for memory
 
 struct TranspositionTable {
+
+    // We need to make sure that there are NO LOCKS on this, so we create 4096 seperate locks. 
+    // A thread only locks the specific tiny section of the table it needs, which allow for concurrency! 
     std::vector<TTEntry> table;
     std::unique_ptr<std::mutex[]> locks; // Striped Locking prevents memory bottlenecks
 
@@ -135,6 +153,87 @@ struct TranspositionTable {
         return false;
     }
 };
+
+// struct TranspositionTable {
+//     std::vector<TTEntry> table;
+//     std::unique_ptr<std::mutex[]> locks;
+    
+//     // --- NEW: Add an array of atomic counters ---
+//     std::unique_ptr<std::atomic<uint64_t>[]> lock_usage_counts;
+
+//     TranspositionTable() : 
+//         table(TT_SIZE, {0, 0, -1, TTFlag::EXACT, Move()}), 
+//         locks(new std::mutex[LOCKS_SIZE]),
+//         // --- NEW: Initialize the counters ---
+//         lock_usage_counts(new std::atomic<uint64_t>[LOCKS_SIZE]) {
+        
+//         for(int i = 0; i < LOCKS_SIZE; ++i) {
+//             lock_usage_counts[i].store(0);
+//         }
+//     }
+    
+//     void store(uint64_t key, int depth, int score, TTFlag flag, Move best_move) {
+//         int index = key & (TT_SIZE - 1); 
+//         int lock_idx = index & (LOCKS_SIZE - 1);
+        
+//         // --- NEW: Track that this specific lock was hit ---
+//         lock_usage_counts[lock_idx].fetch_add(1, std::memory_order_relaxed);
+        
+//         std::lock_guard<std::mutex> lock(locks[lock_idx]);
+//         if (table[index].depth <= depth) { 
+//             table[index] = {key, score, depth, flag, best_move};
+//         }
+//     }
+    
+//     bool probe(uint64_t key, int depth, int alpha, int beta, int& out_score, Move& out_move) {
+//         int index = key & (TT_SIZE - 1);
+//         int lock_idx = index & (LOCKS_SIZE - 1);
+        
+//         // --- NEW: Track that this specific lock was hit ---
+//         lock_usage_counts[lock_idx].fetch_add(1, std::memory_order_relaxed);
+        
+//         std::lock_guard<std::mutex> lock(locks[lock_idx]);
+//         TTEntry entry = table[index];
+        
+//         if (entry.key == key) {
+//             out_move = entry.best_move; 
+            
+//             if (entry.depth >= depth) {
+//                 if (entry.flag == TTFlag::EXACT) { out_score = entry.score; return true; }
+//                 if (entry.flag == TTFlag::LOWERBOUND && entry.score >= beta) { out_score = entry.score; return true; }
+//                 if (entry.flag == TTFlag::UPPERBOUND && entry.score <= alpha) { out_score = entry.score; return true; }
+//             }
+//         }
+//         return false;
+//     }
+    
+//     // --- NEW: A helper function to print the lock statistics ---
+//     void print_lock_debug_stats() {
+//         int unique_locks_used = 0;
+//         uint64_t total_lock_hits = 0;
+//         uint64_t max_hits_on_single_lock = 0;
+        
+//         for(int i = 0; i < LOCKS_SIZE; i++) {
+//             uint64_t hits = lock_usage_counts[i].load(std::memory_order_relaxed);
+//             if(hits > 0) {
+//                 unique_locks_used++;
+//                 total_lock_hits += hits;
+//                 if(hits > max_hits_on_single_lock) {
+//                     max_hits_on_single_lock = hits;
+//                 }
+//             }
+//         }
+        
+//         std::cout << "   --- LOCK DEBUG STATS ---\n";
+//         std::cout << "   Unique Locks Used : " << unique_locks_used << " out of " << LOCKS_SIZE << "\n";
+//         std::cout << "   Total Lock Hits   : " << format_with_commas(total_lock_hits) << "\n";
+//         std::cout << "   Max Hits on 1 Lock: " << format_with_commas(max_hits_on_single_lock) << "\n";
+//         if (unique_locks_used > 0) {
+//             std::cout << "   Avg Hits per Lock : " << format_with_commas(total_lock_hits / unique_locks_used) << "\n";
+//         }
+//         std::cout << "   ------------------------\n";
+//     }
+// };
 
 using TimePoint = std::chrono::time_point<std::chrono::high_resolution_clock>;
 
@@ -495,6 +594,8 @@ Move get_best_move(const Board& board, char player, bool debug_thinking = true) 
         
         long long nps = (time_taken > 0) ? static_cast<long long>(global_stats.nodes_evaluated / time_taken) : 0;
         std::cout << "   Search Speed       : " << format_with_commas(nps) << " nodes/sec\n\n";
+
+        
         
         for (const auto& eval : last_completed_evals) {
             const Move& m = eval.first;
