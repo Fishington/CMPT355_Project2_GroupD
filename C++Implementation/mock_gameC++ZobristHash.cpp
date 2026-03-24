@@ -113,8 +113,16 @@ struct TTEntry {
 };
 
 // 1,048,576 entries ensures a massive memory pool for the hivemind
+// ^^^ This is actually only like 33 mb of ram (2^20)
+
+// Could do 2^26 = 67,108,864 slots. (2.1 gb of ram)
+// Or 134217728 (4.2 GB)
+
+// Lock size also needs a HELLA Increase
+// 65536 
+
 const int TT_SIZE = 1048576; 
-const int LOCKS_SIZE = 4096; // 4096 mutexes prevents Threads from waiting in line for memory
+const int LOCKS_SIZE = 65536; // 4096 mutexes prevents Threads from waiting in line for memory
 
 struct TranspositionTable {
 
