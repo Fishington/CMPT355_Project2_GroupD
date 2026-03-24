@@ -14,6 +14,9 @@
 #include <atomic>
 #include <memory>
 
+// $ g++ -std=c++17 mock_gameC++ZobristHash.cpp -o konaneCPP -O3 -march=native
+
+
 // --- SETTINGS ---
 const double THINKING_TIME = 10.0;  // 10 seconds per turn
 
