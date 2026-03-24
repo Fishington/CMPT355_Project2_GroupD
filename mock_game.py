@@ -370,14 +370,13 @@ def main():
         board_str = f.read().replace('\n', '')
     board = [list(board_str[i:i+8]) for i in range(0, 64, 8)]
 
-    best_move = get_best_move(board, colour, debug_thinking=False)
-
-    if best_move is None:
-        return
-
-    print(best_move)
-    sys.stdout.flush()
-    apply_move(board, best_move, colour)
+    if colour == 'B':
+        best_move = get_best_move(board, colour, debug_thinking=False)
+        if best_move is None:
+            return
+        print(best_move)
+        sys.stdout.flush()
+        apply_move(board, best_move, colour)
 
     while True:
         opponent_move = sys.stdin.readline()
