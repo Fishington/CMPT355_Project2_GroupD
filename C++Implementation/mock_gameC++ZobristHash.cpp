@@ -121,8 +121,8 @@ struct TTEntry {
 // Lock size also needs a HELLA Increase
 // 65536 
 
-const int TT_SIZE = 1048576; 
-const int LOCKS_SIZE = 65536; // 4096 mutexes prevents Threads from waiting in line for memory
+const uint64_t TT_SIZE = 1048576; 
+const uint64_t LOCKS_SIZE = 65536; // 4096 mutexes prevents Threads from waiting in line for memory
 
 struct TranspositionTable {
 
@@ -136,8 +136,8 @@ struct TranspositionTable {
         locks(new std::mutex[LOCKS_SIZE]) {}
     
     void store(uint64_t key, int depth, int score, TTFlag flag, Move best_move) {
-        int index = key & (TT_SIZE - 1); 
-        int lock_idx = index & (LOCKS_SIZE - 1);
+        uint64_t index = key & (TT_SIZE - 1); 
+        uint64_t lock_idx = index & (LOCKS_SIZE - 1);
         
         std::lock_guard<std::mutex> lock(locks[lock_idx]);
         if (table[index].depth <= depth) { 
@@ -146,8 +146,8 @@ struct TranspositionTable {
     }
     
     bool probe(uint64_t key, int depth, int alpha, int beta, int& out_score, Move& out_move) {
-        int index = key & (TT_SIZE - 1);
-        int lock_idx = index & (LOCKS_SIZE - 1);
+        uint64_t index = key & (TT_SIZE - 1);
+        uint64_t lock_idx = index & (LOCKS_SIZE - 1);
         
         std::lock_guard<std::mutex> lock(locks[lock_idx]);
         TTEntry entry = table[index];
@@ -636,6 +636,10 @@ void play_mock_game() {
     
     std::random_device rd;
     std::mt19937 gen(rd());
+
+    std::cout << "Allocating ~171 Gigabytes of RAM for the Hivemind... Please wait...\n";
+    TranspositionTable global_tt;
+    std::cout << "Successfully mapped " << format_with_commas(TT_SIZE) << " TT entries into Memory!\n\n";
     
     while (true) {
         std::cout << "--- Turn " << turn_number << " ---\n";
