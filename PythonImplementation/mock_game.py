@@ -333,30 +333,6 @@ def play_mock_game():
         current_player = 'W' if current_player == 'B' else 'B'
         turn_number += 1
 
-'''s
-def main():
-    if len(sys.argv) != 3:
-        print("Invalid input")
-        return
-
-    board_str = sys.argv[1]
-    colour = sys.argv[2]
-
-    # Convert the board string into a 2D list
-    with open(board_str, 'r') as f:
-        board_str = f.read().replace('\n', '')
-    board = [list(board_str[i:i+8]) for i in range(0, 64, 8)]
-
-    while True: # Need to keep playing until the end
-        # Find the best move
-        best_move = get_best_move(board, colour, debug_thinking=False)
-
-        # Print to stdout
-        print(best_move)
-
-        # Flush stdout
-        sys.stdout.flush()
-    '''
 def main():
     if len(sys.argv) != 3:
         print("Invalid input", file=sys.stderr)
@@ -400,6 +376,5 @@ def main():
 
 
 if __name__ == "__main__":
-    # play_mock_game()
     main()
 
