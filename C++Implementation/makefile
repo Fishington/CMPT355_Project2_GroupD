@@ -1,7 +1,7 @@
 # --- Compiler and Target Name ---
 CXX = g++
-TARGET = konane_ai
-SRC = main.cpp
+TARGET = konane_GroupD
+SRC = KononeCpp.cpp
 
 # --- Aggressive Optimization Flags ---
 # -std=c++17   : Required for your C++17 structured bindings.
