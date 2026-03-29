@@ -16,7 +16,7 @@
 #include <cctype>
 
 // --- SETTINGS ---
-const double THINKING_TIME = 9.8;  // 10 seconds per turn
+const double THINKING_TIME = 9.8;  // Leave slight buffer for overhead
 
 class TimeoutException : public std::exception {};
 
@@ -263,7 +263,7 @@ MoveList get_legal_moves(const Board& board, char player) {
     return moves;
 }
 
-// BITBOARD OPTIMIZATION: Extremely fast move counter without generating structures
+// OPTIMIZATION #1: O(1) Bitboard Move Counting
 int count_legal_moves(const Board& board, char player) {
     int empty_count = 64 - __builtin_popcountll(board.b | board.w);
     if (empty_count == 0) return (player == 'B') ? 2 : 0;
@@ -276,33 +276,56 @@ int count_legal_moves(const Board& board, char player) {
         return count;
     }
 
-    uint64_t my_pieces = (player == 'B') ? board.b : board.w;
-    uint64_t opp_pieces = (player == 'B') ? board.w : board.b;
+    uint64_t mine = (player == 'B') ? board.b : board.w;
+    uint64_t opp = (player == 'B') ? board.w : board.b;
     uint64_t empty = ~(board.b | board.w);
+    
     int count = 0;
     
-    while (my_pieces) {
-        int idx = __builtin_ctzll(my_pieces);
-        my_pieces &= my_pieces - 1;
-        int r = idx / 8, c = idx % 8;
-        
-        int curr_r = r;
-        while (curr_r >= 2) {
-            if ((opp_pieces & (1ULL << ((curr_r - 1) * 8 + c))) && (empty & (1ULL << ((curr_r - 2) * 8 + c)))) { count++; curr_r -= 2; } else break;
-        }
-        curr_r = r;
-        while (curr_r <= 5) {
-            if ((opp_pieces & (1ULL << ((curr_r + 1) * 8 + c))) && (empty & (1ULL << ((curr_r + 2) * 8 + c)))) { count++; curr_r += 2; } else break;
-        }
-        int curr_c = c;
-        while (curr_c >= 2) {
-            if ((opp_pieces & (1ULL << (r * 8 + curr_c - 1))) && (empty & (1ULL << (r * 8 + curr_c - 2)))) { count++; curr_c -= 2; } else break;
-        }
-        curr_c = c;
-        while (curr_c <= 5) {
-            if ((opp_pieces & (1ULL << (r * 8 + curr_c + 1))) && (empty & (1ULL << (r * 8 + curr_c + 2)))) { count++; curr_c += 2; } else break;
-        }
+    // Masks to prevent wrapping around the edges of the board during horizontal shifts
+    const uint64_t notA = 0xFEFEFEFEFEFEFEFEULL; 
+    const uint64_t notH = 0x7F7F7F7F7F7F7F7FULL; 
+
+    // EAST JUMPS (Shift Left 1)
+    uint64_t movers = mine;
+    while (movers) {
+        uint64_t step1 = (movers << 1) & opp & notA;      
+        uint64_t step2 = (step1 << 1) & empty & notA;     
+        if (!step2) break;
+        count += __builtin_popcountll(step2);             
+        movers = step2;                                   
     }
+    
+    // WEST JUMPS (Shift Right 1)
+    movers = mine;
+    while (movers) {
+        uint64_t step1 = (movers >> 1) & opp & notH;
+        uint64_t step2 = (step1 >> 1) & empty & notH;
+        if (!step2) break;
+        count += __builtin_popcountll(step2);
+        movers = step2;
+    }
+
+    // SOUTH JUMPS (Shift Left 8 - down rows)
+    movers = mine;
+    while (movers) {
+        uint64_t step1 = (movers << 8) & opp;
+        uint64_t step2 = (step1 << 8) & empty;
+        if (!step2) break;
+        count += __builtin_popcountll(step2);
+        movers = step2;
+    }
+
+    // NORTH JUMPS (Shift Right 8 - up rows)
+    movers = mine;
+    while (movers) {
+        uint64_t step1 = (movers >> 8) & opp;
+        uint64_t step2 = (step1 >> 8) & empty;
+        if (!step2) break;
+        count += __builtin_popcountll(step2);
+        movers = step2;
+    }
+
     return count;
 }
 
@@ -317,7 +340,7 @@ int evaluate_board(const Board& board, char player) {
 }
 
 // --- MINIMAX ---
-std::pair<int, Move> minimax(Board board, int depth, int alpha, int beta, bool is_maximizing, char current_player, char original_player, TimePoint start_time, Stats& stats, TranspositionTable& tt, std::atomic<bool>& time_out, uint64_t hash_key) {
+std::pair<int, Move> minimax(Board board, int depth, int alpha, int beta, bool is_maximizing, char current_player, char original_player, TimePoint start_time, Stats& stats, TranspositionTable& tt, std::atomic<bool>& time_out, uint64_t hash_key, int history[64][64]) {
     
     if ((stats.nodes_evaluated & 2047) == 0) {
         if (get_elapsed(start_time) > THINKING_TIME) {
@@ -345,39 +368,36 @@ std::pair<int, Move> minimax(Board board, int depth, int alpha, int beta, bool i
     MoveList moves = get_legal_moves(board, current_player);
     
     if (moves.empty()) {
-        // DEPTH ADJUSTMENT: Prioritizes taking the fastest paths to victory, or longest paths to defeat
         int eval = (current_player == original_player) ? -10000 - depth : 10000 + depth;
         tt.store(hash_key, depth, eval, TTFlag::EXACT, Move());
         return {eval, Move()};
     }
 
-    // INLINE MOVE ORDERING: Bubbles cached TT move straight to the front
-    int tt_move_idx = -1;
+    // OPTIMIZATION #3: History Heuristics + Custom Insertion Sort
+    int scores[128];
     for (size_t i = 0; i < moves.size(); ++i) {
-        if (moves[i] == tt_move) { tt_move_idx = i; break; }
-    }
-    if (tt_move_idx != -1 && tt_move_idx != 0) {
-        std::swap(moves[0], moves[tt_move_idx]);
+        if (moves[i] == tt_move) {
+            scores[i] = 10000000; // Bubble cached TT move to absolute front
+        } else {
+            int jump_dist = moves[i].is_jump ? std::abs(moves[i].end_r - moves[i].start_r) + std::abs(moves[i].end_c - moves[i].start_c) : 0;
+            int start_idx = moves[i].start_r * 8 + moves[i].start_c;
+            int end_idx = moves[i].end_r * 8 + moves[i].end_c;
+            scores[i] = (jump_dist * 1000) + history[start_idx][end_idx]; 
+        }
     }
     
-    // Sort remainder safely (jumps by lengths to maximize alpha-beta pruning)
-    if (moves.size() > 2) {
-        int scores[128];
-        for (size_t i = 1; i < moves.size(); ++i) {
-            scores[i] = moves[i].is_jump ? std::abs(moves[i].end_r - moves[i].start_r) + std::abs(moves[i].end_c - moves[i].start_c) : 0;
+    // Inline Insertion sort (fastest for small arrays)
+    for (size_t i = 1; i < moves.size(); ++i) {
+        Move key_m = moves[i];
+        int key_s = scores[i];
+        int j = i - 1;
+        while (j >= 0 && scores[j] < key_s) {
+            moves[j + 1] = moves[j];
+            scores[j + 1] = scores[j];
+            j--;
         }
-        for (size_t i = 2; i < moves.size(); ++i) {
-            Move key_m = moves[i];
-            int key_s = scores[i];
-            int j = i - 1;
-            while (j >= 1 && scores[j] < key_s) {
-                moves[j + 1] = moves[j];
-                scores[j + 1] = scores[j];
-                j--;
-            }
-            moves[j + 1] = key_m;
-            scores[j + 1] = key_s;
-        }
+        moves[j + 1] = key_m;
+        scores[j + 1] = key_s;
     }
 
     Move best_move = moves[0];
@@ -387,19 +407,36 @@ std::pair<int, Move> minimax(Board board, int depth, int alpha, int beta, bool i
 
     if (is_maximizing) {
         int max_eval = -1e9;
+        int move_idx = 0;
         for (const auto& move : moves) {
             Board new_board = board;
             uint64_t new_hash = hash_key;
             apply_move(new_board, move, current_player, new_hash);
             
-            auto[eval_score, _] = minimax(new_board, depth - 1, alpha, beta, false, next_player, original_player, start_time, stats, tt, time_out, new_hash);
+            int eval_score;
             
-            if (eval_score > max_eval) {
-                max_eval = eval_score;
-                best_move = move;
+            // OPTIMIZATION #2: Late Move Reductions (LMR)
+            if (depth >= 3 && move_idx >= 3) {
+                auto[score, _] = minimax(new_board, depth - 2, alpha, beta, false, next_player, original_player, start_time, stats, tt, time_out, new_hash, history);
+                eval_score = score;
+                if (eval_score > alpha) { // If move looks surprisingly good, re-search deeply
+                    auto[full_score, _] = minimax(new_board, depth - 1, alpha, beta, false, next_player, original_player, start_time, stats, tt, time_out, new_hash, history);
+                    eval_score = full_score;
+                }
+            } else {
+                auto[score, _] = minimax(new_board, depth - 1, alpha, beta, false, next_player, original_player, start_time, stats, tt, time_out, new_hash, history);
+                eval_score = score;
             }
+            
+            if (eval_score > max_eval) { max_eval = eval_score; best_move = move; }
             alpha = std::max(alpha, eval_score);
-            if (beta <= alpha) { stats.cutoffs++; break; }
+            
+            if (beta <= alpha) { 
+                stats.cutoffs++; 
+                history[move.start_r * 8 + move.start_c][move.end_r * 8 + move.end_c] += (depth * depth); // Reward good moves
+                break; 
+            }
+            move_idx++;
         }
         
         TTFlag flag = TTFlag::EXACT;
@@ -410,19 +447,36 @@ std::pair<int, Move> minimax(Board board, int depth, int alpha, int beta, bool i
         
     } else {
         int min_eval = 1e9;
+        int move_idx = 0;
         for (const auto& move : moves) {
             Board new_board = board;
             uint64_t new_hash = hash_key;
             apply_move(new_board, move, current_player, new_hash);
             
-            auto[eval_score, _] = minimax(new_board, depth - 1, alpha, beta, true, next_player, original_player, start_time, stats, tt, time_out, new_hash);
+            int eval_score;
             
-            if (eval_score < min_eval) {
-                min_eval = eval_score;
-                best_move = move;
+            // LMR for minimizing branch
+            if (depth >= 3 && move_idx >= 3) {
+                auto[score, _] = minimax(new_board, depth - 2, alpha, beta, true, next_player, original_player, start_time, stats, tt, time_out, new_hash, history);
+                eval_score = score;
+                if (eval_score < beta) {
+                    auto[full_score, _] = minimax(new_board, depth - 1, alpha, beta, true, next_player, original_player, start_time, stats, tt, time_out, new_hash, history);
+                    eval_score = full_score;
+                }
+            } else {
+                auto[score, _] = minimax(new_board, depth - 1, alpha, beta, true, next_player, original_player, start_time, stats, tt, time_out, new_hash, history);
+                eval_score = score;
             }
+            
+            if (eval_score < min_eval) { min_eval = eval_score; best_move = move; }
             beta = std::min(beta, eval_score);
-            if (beta <= alpha) { stats.cutoffs++; break; }
+            
+            if (beta <= alpha) { 
+                stats.cutoffs++; 
+                history[move.start_r * 8 + move.start_c][move.end_r * 8 + move.end_c] += (depth * depth);
+                break; 
+            }
+            move_idx++;
         }
         
         TTFlag flag = TTFlag::EXACT;
@@ -465,46 +519,73 @@ Move get_best_move(const Board& board, char player, bool debug_thinking = true) 
         std::mt19937 rng(12345 + thread_id); 
         char next_player = (player == 'B') ? 'W' : 'B';
         
+        int history[64][64] = {0}; // Local thread history matrix
+        
         try {
             int depth = 1;
             while (!time_out.load(std::memory_order_relaxed)) {
                 if (thread_id > 0) std::shuffle(moves.begin(), moves.end(), rng);
                 
-                std::vector<std::pair<Move, int>> current_scores;
+                // OPTIMIZATION #4: Aspiration Windows
                 int alpha = -1e9;
                 int beta = 1e9;
-                int max_eval = -1e9;
-                Move current_best_move = moves[0];
+                int alpha_orig = alpha;
+                int beta_orig = beta;
                 
-                for (const auto& move : moves) {
-                    Board new_board = board;
-                    uint64_t new_hash = root_hash;
-                    apply_move(new_board, move, player, new_hash);
+                // Clamp the search window tightly around the previous depth's best score
+                bool use_window = (thread_id == 0 && depth >= 3 && !last_completed_evals.empty());
+                if (use_window) {
+                    alpha = last_completed_evals[0].second - 50;
+                    beta = last_completed_evals[0].second + 50;
+                    alpha_orig = alpha;
+                    beta_orig = beta;
+                }
+
+                // Inner loop to allow for re-searches if the score falls outside the Aspiration Window
+                while (true && !time_out.load(std::memory_order_relaxed)) {
+                    int max_eval = -1e9;
+                    Move current_best_move = moves[0];
+                    std::vector<std::pair<Move, int>> current_scores;
+                    int current_alpha = alpha;
                     
-                    auto [score, _] = minimax(new_board, depth - 1, alpha, beta, false, next_player, player, start_time, local_stats, global_tt, time_out, new_hash);
-                    
-                    if (thread_id == 0) current_scores.push_back({move, score});
-                    
-                    if (score > max_eval) {
-                        max_eval = score;
-                        current_best_move = move;
+                    for (const auto& move : moves) {
+                        Board new_board = board;
+                        uint64_t new_hash = root_hash;
+                        apply_move(new_board, move, player, new_hash);
+                        
+                        auto [score, _] = minimax(new_board, depth - 1, current_alpha, beta, false, next_player, player, start_time, local_stats, global_tt, time_out, new_hash, history);
+                        
+                        if (thread_id == 0) current_scores.push_back({move, score});
+                        
+                        if (score > max_eval) {
+                            max_eval = score;
+                            current_best_move = move;
+                        }
+                        current_alpha = std::max(current_alpha, score);
                     }
-                    alpha = std::max(alpha, score);
-                }
-                
-                if (thread_id == 0) {
-                    best_move = current_best_move;
-                    std::sort(current_scores.begin(), current_scores.end(),[](const auto& a, const auto& b) { 
-                        return a.second > b.second; 
-                    });
-                    last_completed_evals = current_scores;
-                    last_completed_depth = depth;
                     
-                    moves.clear();
-                    for (const auto& eval : current_scores) moves.push_back(eval.first);
+                    // If the score was entirely unexpected, reset limits and re-search immediately
+                    if (use_window && (max_eval <= alpha_orig || max_eval >= beta_orig) && !time_out.load(std::memory_order_relaxed)) {
+                        alpha = -1e9;
+                        beta = 1e9;
+                        use_window = false;
+                        continue;
+                    }
+                    
+                    if (thread_id == 0) {
+                        best_move = current_best_move;
+                        std::sort(current_scores.begin(), current_scores.end(),[](const auto& a, const auto& b) { 
+                            return a.second > b.second; 
+                        });
+                        last_completed_evals = current_scores;
+                        last_completed_depth = depth;
+                        
+                        moves.clear();
+                        for (const auto& eval : current_scores) moves.push_back(eval.first);
+                    }
+                    break; 
                 }
-                
-                if (max_eval >= 9000) break;
+                if (depth >= 64) break; 
                 depth++;
             }
         } catch (const TimeoutException&) {
@@ -610,7 +691,7 @@ int main(int argc, char* argv[]) {
     char colour = argv[2][0];
     Board board = parse_board_file(board_file);
     
-    uint64_t fake_hash = 0; // Temp hash as it computes fresh during `get_best_move` anyway
+    uint64_t fake_hash = 0; 
     MoveList moves = get_legal_moves(board, colour);
     if (moves.empty()) return 0; 
 
