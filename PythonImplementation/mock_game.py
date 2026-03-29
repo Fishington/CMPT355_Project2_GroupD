@@ -1,9 +1,12 @@
+#!/usr/bin/env python3
+
 import time
 import random
 import copy
+import sys
 
 # --- SETTINGS ---
-THINKING_TIME = 10.0  # 10 seconds per turn
+THINKING_TIME = 10  # 10 seconds per turn
 
 class TimeoutException(Exception):
     pass
@@ -330,5 +333,48 @@ def play_mock_game():
         current_player = 'W' if current_player == 'B' else 'B'
         turn_number += 1
 
+def main():
+    if len(sys.argv) != 3:
+        print("Invalid input", file=sys.stderr)
+        return
+
+    board_file = sys.argv[1]
+    colour = sys.argv[2]
+
+    # Convert the board string into a 2D list
+    with open(board_file, 'r') as f:
+        board_str = f.read().replace('\n', '')
+    board = [list(board_str[i:i+8]) for i in range(0, 64, 8)]
+
+    best_move = get_best_move(board, colour, debug_thinking=False)
+
+    if best_move is None:
+        return
+
+    print(best_move)
+    sys.stdout.flush()
+    apply_move(board, best_move, colour)
+
+    while True:
+        opponent_move = sys.stdin.readline()
+        if not opponent_move:
+            continue
+
+        opponent_move = opponent_move.strip()
+
+        apply_move(board, opponent_move, 'W' if colour == 'B' else 'B')
+
+        best_move = get_best_move(board, colour, debug_thinking=False)
+        if best_move is None:
+            break
+
+        print(best_move)
+        sys.stdout.flush()
+
+        apply_move(board, best_move, colour)
+
+
+
 if __name__ == "__main__":
-    play_mock_game()
+    main()
+
