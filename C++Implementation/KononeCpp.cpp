@@ -14,6 +14,7 @@
 #include <memory>
 #include <fstream>
 #include <cctype>
+#include <cstdlib>
 
 // --- SETTINGS ---
 const double THINKING_TIME = 9.8;  // Leave slight buffer for overhead
@@ -102,8 +103,9 @@ uint64_t compute_zobrist(const Board& board, char player) {
 }
 
 // --- GLOBAL SHARED TRANSPOSITION TABLE (LAZY SMP) ---
-enum class TTFlag : uint8_t { EXACT, LOWERBOUND, UPPERBOUND };
+enum class TTFlag : uint8_t { EXACT = 0, LOWERBOUND = 1, UPPERBOUND = 2 };
 
+// Struct size is ~24 bytes (with padding)
 struct TTEntry {
     uint64_t key;
     int score;
@@ -112,39 +114,52 @@ struct TTEntry {
     Move best_move; 
 };
 
-const int TT_SIZE = 1048576; 
+// HARDWARE CONSTRAINTS: 
+// 2^28 entries = 268,435,456 entries * 24 bytes = ~6.4 GB of Memory! 
+// This fits incredibly safely within the 16 GB constraint.
+const int TT_SIZE = 268435456; 
+const int LOCK_SIZE = 65536; // Lock striping: 65,536 locks to cover 268M entries.
 
-// SPINLOCK: Lightning fast alternative to std::mutex for multi-threading
-struct SpinLock {
+// alignas(64): Forces each SpinLock to occupy its own CPU Cache Line (64 bytes).
+// This eliminates "False Sharing", preventing 4 cores from throttling each other!
+struct alignas(64) SpinLock {
     std::atomic_flag locked = ATOMIC_FLAG_INIT;
     inline void lock() { while (locked.test_and_set(std::memory_order_acquire)) {} }
     inline void unlock() { locked.clear(std::memory_order_release); }
 };
 
 struct TranspositionTable {
-    std::vector<TTEntry> table;
+    TTEntry* table;
     std::unique_ptr<SpinLock[]> locks; 
 
-    TranspositionTable() : 
-        table(TT_SIZE, {0, 0, -1, TTFlag::EXACT, Move()}), 
-        locks(new SpinLock[TT_SIZE]) {}
+    TranspositionTable() {
+        // calloc allocates 6.4 GB instantly via anonymous mmap on Linux zero-pages
+        table = (TTEntry*)std::calloc(TT_SIZE, sizeof(TTEntry));
+        locks.reset(new SpinLock[LOCK_SIZE]);
+    }
+    
+    ~TranspositionTable() {
+        std::free(table);
+    }
     
     void store(uint64_t key, int depth, int score, TTFlag flag, Move best_move) {
         int index = key & (TT_SIZE - 1); 
+        int lock_idx = key & (LOCK_SIZE - 1); 
         
-        locks[index].lock();
+        locks[lock_idx].lock();
         if (table[index].depth <= depth) { 
             table[index] = {key, score, depth, flag, best_move};
         }
-        locks[index].unlock();
+        locks[lock_idx].unlock();
     }
     
     bool probe(uint64_t key, int depth, int alpha, int beta, int& out_score, Move& out_move) {
         int index = key & (TT_SIZE - 1);
+        int lock_idx = key & (LOCK_SIZE - 1);
         
-        locks[index].lock();
+        locks[lock_idx].lock();
         TTEntry entry = table[index];
-        locks[index].unlock();
+        locks[lock_idx].unlock();
         
         if (entry.key == key) {
             out_move = entry.best_move; 
@@ -168,7 +183,7 @@ double get_elapsed(TimePoint start) {
 // --- GAME LOGIC ---
 inline Board clone_board(const Board& board) { return board; }
 
-// INCREMENTAL ZOBRIST: Avoids recomputing hash from scratch on every turn
+// INCREMENTAL ZOBRIST
 void apply_move(Board& board, const Move& move, char current_player, uint64_t& hash) {
     uint64_t& my_pieces = (current_player == 'B') ? board.b : board.w;
     uint64_t& opp_pieces = (current_player == 'B') ? board.w : board.b;
@@ -263,7 +278,6 @@ MoveList get_legal_moves(const Board& board, char player) {
     return moves;
 }
 
-// OPTIMIZATION #1: O(1) Bitboard Move Counting
 int count_legal_moves(const Board& board, char player) {
     int empty_count = 64 - __builtin_popcountll(board.b | board.w);
     if (empty_count == 0) return (player == 'B') ? 2 : 0;
@@ -281,12 +295,9 @@ int count_legal_moves(const Board& board, char player) {
     uint64_t empty = ~(board.b | board.w);
     
     int count = 0;
-    
-    // Masks to prevent wrapping around the edges of the board during horizontal shifts
     const uint64_t notA = 0xFEFEFEFEFEFEFEFEULL; 
     const uint64_t notH = 0x7F7F7F7F7F7F7F7FULL; 
 
-    // EAST JUMPS (Shift Left 1)
     uint64_t movers = mine;
     while (movers) {
         uint64_t step1 = (movers << 1) & opp & notA;      
@@ -296,7 +307,6 @@ int count_legal_moves(const Board& board, char player) {
         movers = step2;                                   
     }
     
-    // WEST JUMPS (Shift Right 1)
     movers = mine;
     while (movers) {
         uint64_t step1 = (movers >> 1) & opp & notH;
@@ -306,7 +316,6 @@ int count_legal_moves(const Board& board, char player) {
         movers = step2;
     }
 
-    // SOUTH JUMPS (Shift Left 8 - down rows)
     movers = mine;
     while (movers) {
         uint64_t step1 = (movers << 8) & opp;
@@ -316,7 +325,6 @@ int count_legal_moves(const Board& board, char player) {
         movers = step2;
     }
 
-    // NORTH JUMPS (Shift Right 8 - up rows)
     movers = mine;
     while (movers) {
         uint64_t step1 = (movers >> 8) & opp;
@@ -373,11 +381,10 @@ std::pair<int, Move> minimax(Board board, int depth, int alpha, int beta, bool i
         return {eval, Move()};
     }
 
-    // OPTIMIZATION #3: History Heuristics + Custom Insertion Sort
     int scores[128];
     for (size_t i = 0; i < moves.size(); ++i) {
         if (moves[i] == tt_move) {
-            scores[i] = 10000000; // Bubble cached TT move to absolute front
+            scores[i] = 10000000; 
         } else {
             int jump_dist = moves[i].is_jump ? std::abs(moves[i].end_r - moves[i].start_r) + std::abs(moves[i].end_c - moves[i].start_c) : 0;
             int start_idx = moves[i].start_r * 8 + moves[i].start_c;
@@ -386,7 +393,6 @@ std::pair<int, Move> minimax(Board board, int depth, int alpha, int beta, bool i
         }
     }
     
-    // Inline Insertion sort (fastest for small arrays)
     for (size_t i = 1; i < moves.size(); ++i) {
         Move key_m = moves[i];
         int key_s = scores[i];
@@ -415,11 +421,10 @@ std::pair<int, Move> minimax(Board board, int depth, int alpha, int beta, bool i
             
             int eval_score;
             
-            // OPTIMIZATION #2: Late Move Reductions (LMR)
             if (depth >= 3 && move_idx >= 3) {
                 auto[score, _] = minimax(new_board, depth - 2, alpha, beta, false, next_player, original_player, start_time, stats, tt, time_out, new_hash, history);
                 eval_score = score;
-                if (eval_score > alpha) { // If move looks surprisingly good, re-search deeply
+                if (eval_score > alpha) { 
                     auto[full_score, _] = minimax(new_board, depth - 1, alpha, beta, false, next_player, original_player, start_time, stats, tt, time_out, new_hash, history);
                     eval_score = full_score;
                 }
@@ -433,7 +438,7 @@ std::pair<int, Move> minimax(Board board, int depth, int alpha, int beta, bool i
             
             if (beta <= alpha) { 
                 stats.cutoffs++; 
-                history[move.start_r * 8 + move.start_c][move.end_r * 8 + move.end_c] += (depth * depth); // Reward good moves
+                history[move.start_r * 8 + move.start_c][move.end_r * 8 + move.end_c] += (depth * depth); 
                 break; 
             }
             move_idx++;
@@ -455,7 +460,6 @@ std::pair<int, Move> minimax(Board board, int depth, int alpha, int beta, bool i
             
             int eval_score;
             
-            // LMR for minimizing branch
             if (depth >= 3 && move_idx >= 3) {
                 auto[score, _] = minimax(new_board, depth - 2, alpha, beta, true, next_player, original_player, start_time, stats, tt, time_out, new_hash, history);
                 eval_score = score;
@@ -497,15 +501,17 @@ std::string format_with_commas(long long value) {
     return s;
 }
 
-Move get_best_move(const Board& board, char player, bool debug_thinking = true) {
+// PASS TT BY REFERENCE: Allows it to retain memory persistently across entire game!
+Move get_best_move(const Board& board, char player, TranspositionTable& global_tt, bool debug_thinking = true) {
     auto start_time = std::chrono::high_resolution_clock::now();
     MoveList legal_moves = get_legal_moves(board, player);
     if (legal_moves.empty()) return Move();
     
+    // STRICT CORE ENFORCEMENT
     unsigned int num_cores = std::thread::hardware_concurrency();
     if (num_cores == 0) num_cores = 4; 
+    num_cores = std::min(num_cores, 4u); // NEVER EXCEED 4 CORES
     
-    TranspositionTable global_tt;
     std::atomic<bool> time_out{false};
     uint64_t root_hash = compute_zobrist(board, player);
     
@@ -519,20 +525,18 @@ Move get_best_move(const Board& board, char player, bool debug_thinking = true) 
         std::mt19937 rng(12345 + thread_id); 
         char next_player = (player == 'B') ? 'W' : 'B';
         
-        int history[64][64] = {0}; // Local thread history matrix
+        int history[64][64] = {0}; 
         
         try {
             int depth = 1;
             while (!time_out.load(std::memory_order_relaxed)) {
                 if (thread_id > 0) std::shuffle(moves.begin(), moves.end(), rng);
                 
-                // OPTIMIZATION #4: Aspiration Windows
                 int alpha = -1e9;
                 int beta = 1e9;
                 int alpha_orig = alpha;
                 int beta_orig = beta;
                 
-                // Clamp the search window tightly around the previous depth's best score
                 bool use_window = (thread_id == 0 && depth >= 3 && !last_completed_evals.empty());
                 if (use_window) {
                     alpha = last_completed_evals[0].second - 50;
@@ -541,7 +545,6 @@ Move get_best_move(const Board& board, char player, bool debug_thinking = true) 
                     beta_orig = beta;
                 }
 
-                // Inner loop to allow for re-searches if the score falls outside the Aspiration Window
                 while (true && !time_out.load(std::memory_order_relaxed)) {
                     int max_eval = -1e9;
                     Move current_best_move = moves[0];
@@ -564,7 +567,6 @@ Move get_best_move(const Board& board, char player, bool debug_thinking = true) 
                         current_alpha = std::max(current_alpha, score);
                     }
                     
-                    // If the score was entirely unexpected, reset limits and re-search immediately
                     if (use_window && (max_eval <= alpha_orig || max_eval >= beta_orig) && !time_out.load(std::memory_order_relaxed)) {
                         alpha = -1e9;
                         beta = 1e9;
@@ -614,31 +616,16 @@ Move get_best_move(const Board& board, char player, bool debug_thinking = true) 
         std::cout << "   Active CPU Threads : " << num_cores << "\n";
         std::cout << "   Nodes Evaluated    : " << format_with_commas(global_stats.nodes_evaluated) 
                   << " | Alpha-Beta Cutoffs: " << format_with_commas(global_stats.cutoffs) << "\n";
-        std::cout << "   TT Cache Hits      : " << format_with_commas(global_stats.tt_hits) << " (Hivemind Shared Data)\n";
+        std::cout << "   TT Cache Hits      : " << format_with_commas(global_stats.tt_hits) << "\n";
         std::cout << std::fixed << std::setprecision(2);
         std::cout << "   Time Taken         : " << time_taken << " seconds (Time Limit: " << THINKING_TIME << " seconds)\n";
         
         long long nps = (time_taken > 0) ? static_cast<long long>(global_stats.nodes_evaluated / time_taken) : 0;
         std::cout << "   Search Speed       : " << format_with_commas(nps) << " nodes/sec\n\n";
-        
-        for (const auto& eval : last_completed_evals) {
-            const Move& m = eval.first;
-            int s = eval.second;
-            std::string score_str;
-            if (s >= 9000) score_str = "WINNING TRAP FOUND!";
-            else if (s <= -9000) score_str = "AVOIDING LOSS!";
-            else { char buf[64]; snprintf(buf, sizeof(buf), "%+d move advantage", s); score_str = buf; }
-            
-            std::string marker = (m == best_move) ? ">> " : "   ";
-            std::cout << "    " << marker << "Move: " << std::left << std::setw(8) << m.to_string() 
-                      << " | Score: " << score_str << "\n";
-        }
-        std::cout << "\n";
     }
     return best_move;
 }
 
-// --- FILE & INPUT PARSING HELPER FUNCTIONS ---
 std::string trim(const std::string& str) {
     size_t first = str.find_first_not_of(" \n\r\t");
     if (std::string::npos == first) return "";
@@ -687,6 +674,10 @@ int main(int argc, char* argv[]) {
     if (argc != 3) { std::cerr << "Invalid input\n"; return 1; }
     init_zobrist();
 
+    // PERSISTENT MEMORY ALLOCATION: Happens exactly ONCE.
+    // Lives through the whole game to memorize opponent branches!
+    TranspositionTable global_tt;
+
     std::string board_file = argv[1];
     char colour = argv[2][0];
     Board board = parse_board_file(board_file);
@@ -695,7 +686,8 @@ int main(int argc, char* argv[]) {
     MoveList moves = get_legal_moves(board, colour);
     if (moves.empty()) return 0; 
 
-    Move best_move = get_best_move(board, colour, false); 
+    // Passing the global TT down so it can feed the network
+    Move best_move = get_best_move(board, colour, global_tt, false); 
     std::cout << best_move.to_string() << std::endl; 
     apply_move(board, best_move, colour, fake_hash);
 
@@ -712,7 +704,7 @@ int main(int argc, char* argv[]) {
         moves = get_legal_moves(board, colour);
         if (moves.empty()) break; 
 
-        best_move = get_best_move(board, colour, false);
+        best_move = get_best_move(board, colour, global_tt, false);
         std::cout << best_move.to_string() << std::endl;
         apply_move(board, best_move, colour, fake_hash);
     }
