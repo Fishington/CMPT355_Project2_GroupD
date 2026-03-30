@@ -246,9 +246,9 @@ int play_match(const Genome& g1, const Genome& g2, int match_id) {
         } else {
             // Depth 4 is fast enough to run millions of games, but deep enough to show intelligence
             if (current_player == 'B') {
-                chosen_move = minimax_genome(board, 7, -1e9, 1e9, true, 'B', 'B', g1, pst1).second;
+                chosen_move = minimax_genome(board, 5, -1e9, 1e9, true, 'B', 'B', g1, pst1).second;
             } else {
-                chosen_move = minimax_genome(board, 7, -1e9, 1e9, true, 'W', 'W', g2, pst2).second;
+                chosen_move = minimax_genome(board, 5, -1e9, 1e9, true, 'W', 'W', g2, pst2).second;
             }
         }
 
@@ -261,9 +261,9 @@ int play_match(const Genome& g1, const Genome& g2, int match_id) {
 
 // --- EVOLUTIONARY ALGORITHM ---
 int main() {
-    const int POPULATION_SIZE = 1000;
-    const int GENERATIONS = 2500;
-    const int NUM_CORES = std::thread::hardware_concurrency(); // Will detect all 80 cores
+    const int POPULATION_SIZE = 500;   // High genetic diversity
+    const int GENERATIONS = 2000;      // Gives it enough time to fully converge
+    const int NUM_CORES = 16;          // 9800X3D has 16 hardware threads
     
     std::cout << "Starting 80-Core Konane Genetic Trainer...\n";
     std::cout << "Detected Cores: " << NUM_CORES << "\n\n";

@@ -29,18 +29,18 @@
 const double THINKING_TIME = 9.8; 
 
 // --- GENETICALLY TUNED WEIGHTS ---
-constexpr int MOBILITY_WEIGHT = 85; 
-constexpr int POSITION_WEIGHT = 15;
+constexpr int MOBILITY_WEIGHT = 88; 
+constexpr int POSITION_WEIGHT = 12;
 
 constexpr int PIECE_SQUARE_TABLE[64] = {
-    158,  -3, -13,   4,   4, -13,  -3, 158,
-      7, -16, -38,  55,  55, -38, -16,   7,
-    -11, -60, -76, -75, -75, -76, -60, -11,
-    -33, -20,   0,  77,  77,   0, -20, -33,
-    -33, -20,   0,  77,  77,   0, -20, -33,
-    -11, -60, -76, -75, -75, -76, -60, -11,
-      7, -16, -38,  55,  55, -38, -16,   7,
-    158,  -3, -13,   4,   4, -13,  -3, 158
+     50, -30,  15,  10,  10,  15, -30,  50,
+    -30, -20,  -5,   5,   5,  -5, -20, -30,
+     15,  -5,  10,  15,  15,  10,  -5,  15,
+     10,   5,  15,  20,  20,  15,   5,  10,
+     10,   5,  15,  20,  20,  15,   5,  10,
+     15,  -5,  10,  15,  15,  10,  -5,  15,
+    -30, -20,  -5,   5,   5,  -5, -20, -30,
+     50, -30,  15,  10,  10,  15, -30,  50
 };
 
 class TimeoutException : public std::exception {};
@@ -713,6 +713,7 @@ Move parse_move(const std::string& str) {
     return m;
 }
 
+// --- MAIN I/O LOOP ---
 int main(int argc, char* argv[]) {
     if (argc != 3) { std::cerr << "Invalid input\n"; return 1; }
     init_zobrist();
@@ -721,33 +722,48 @@ int main(int argc, char* argv[]) {
 
     std::string board_file = argv[1];
     char colour = argv[2][0];
-    Board board = parse_board_file(board_file);
+    char opp_colour = (colour == 'B') ? 'W' : 'B'; // Track opponent's color
     
+    Board board = parse_board_file(board_file);
     uint64_t fake_hash = 0; 
+    
     MoveList moves = get_legal_moves(board, colour);
     if (moves.empty()) return 0; 
 
-    // Feel free to change this back to `false` for your actual submission if the driver doesn't like extra prints
-    Move best_move = get_best_move(board, colour, global_tt, true); 
+    // --- TURN 1 ---
+    Move best_move = get_best_move(board, colour, global_tt, false); 
     std::cout << best_move.to_string() << std::endl; 
     apply_move(board, best_move, colour, fake_hash);
+    
+    // Check for an instant win on Turn 1 (Rare, but possible in tiny boards)
+    if (count_legal_moves(board, opp_colour) == 0) {
+        std::cerr << "\n🏆 Group D Wins! 🏆\n" << std::endl;
+        return 0;
+    }
 
     std::string opponent_move_str;
     while (std::getline(std::cin, opponent_move_str)) {
         opponent_move_str = trim(opponent_move_str);
         if (opponent_move_str.empty()) continue; 
 
-        char opp_colour = (colour == 'B') ? 'W' : 'B';
         Move opp_move = parse_move(opponent_move_str);
-        
         apply_move(board, opp_move, opp_colour, fake_hash);
 
+        // Check if the opponent's move trapped us (We lose)
         moves = get_legal_moves(board, colour);
         if (moves.empty()) break; 
 
-        best_move = get_best_move(board, colour, global_tt, true);
+        // --- OUR TURN ---
+        best_move = get_best_move(board, colour, global_tt, false);
         std::cout << best_move.to_string() << std::endl;
         apply_move(board, best_move, colour, fake_hash);
+        
+        // --- VICTORY CHECK ---
+        
+        if (count_legal_moves(board, opp_colour) == 0) {
+            std::cerr << "\n Group D Wins! 🏆\n" << std::endl;
+            break;
+        }
     }
     return 0;
 }
