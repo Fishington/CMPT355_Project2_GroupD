@@ -51,22 +51,29 @@ struct Board {
 };
 
 struct Move {
-    int8_t start_r = 0, start_c = 0;
-    int8_t end_r = 0, end_c = 0;
-    bool is_jump = false;
+    int8_t start_r = 0, start_c = 0;  // Starting row and column of the move
+    int8_t end_r = 0, end_c = 0;      // Ending row and column of the move (pass move if same as start)
+    bool is_jump = false;              // True if this is a jump move, false if a pass move
 
+    // Equality comparison for moves
     bool operator==(const Move& o) const {
         return start_r == o.start_r && start_c == o.start_c &&
                end_r == o.end_r && end_c == o.end_c && is_jump == o.is_jump;
     }
 
+    // Convert move to algebraic notation (e.g., "A8" for pass, "A8-C6" for jump)
     std::string to_string() const {
-        auto coords_to_notation =[](int r, int c) {
-            char col_char = (char)(c + 'A');
-            char row_char = '8' - r;
+        // Helper lambda to convert row/column indices to algebraic notation
+        auto coords_to_notation = [](int r, int c) {
+            char col_char = (char)(c + 'A');  // Convert column index to letter (0->A, 1->B, etc.)
+            char row_char = '8' - r;           // Convert row index to number (0->8, 1->7, etc.)
             return std::string{col_char, row_char};
         };
+        
+        // Pass move: just return starting position
         if (!is_jump) return coords_to_notation(start_r, start_c);
+        
+        // Jump move: return "start-end" format
         return coords_to_notation(start_r, start_c) + "-" + coords_to_notation(end_r, end_c);
     }
 };
@@ -97,30 +104,42 @@ uint64_t zobrist_b[64];
 uint64_t zobrist_w[64];
 uint64_t zobrist_turn;
 
+// --- ZOBRIST HASHING INITIALIZATION ---
+// Initializes random 64-bit numbers for each square and player, used for fast incremental hash updates
 void init_zobrist() {
-    std::mt19937_64 rng(12345); 
+    std::mt19937_64 rng(12345);  // Seeded RNG for reproducible zobrist numbers
     for (int i = 0; i < 64; ++i) {
-        zobrist_b[i] = rng();
-        zobrist_w[i] = rng();
+        zobrist_b[i] = rng();     // Random number for black piece at square i
+        zobrist_w[i] = rng();     // Random number for white piece at square i
     }
-    zobrist_turn = rng();
+    zobrist_turn = rng();         // Random number to XOR when it's black's turn
 }
 
+// --- ZOBRIST HASHING COMPUTATION ---
+// Computes the zobrist hash for a given board state and active player
+// Uses XOR of pre-generated numbers to create a unique hash value
 uint64_t compute_zobrist(const Board& board, char player) {
     uint64_t hash = 0;
+    
+    // XOR in all black pieces
     uint64_t b = board.b;
     while (b) {
-        int idx = __builtin_ctzll(b);
-        hash ^= zobrist_b[idx];
-        b &= b - 1;
+        int idx = __builtin_ctzll(b);     // Get index of lowest set bit (LSB)
+        hash ^= zobrist_b[idx];            // XOR the zobrist number for this square
+        b &= b - 1;                        // Clear the LSB
     }
+    
+    // XOR in all white pieces
     uint64_t w = board.w;
     while (w) {
-        int idx = __builtin_ctzll(w);
-        hash ^= zobrist_w[idx];
-        w &= w - 1;
+        int idx = __builtin_ctzll(w);     // Get index of lowest set bit
+        hash ^= zobrist_w[idx];            // XOR the zobrist number for this square
+        w &= w - 1;                        // Clear the LSB
     }
+    
+    // XOR in turn indicator if black plays (distinguishes positions where turn matters)
     if (player == 'B') hash ^= zobrist_turn;
+    
     return hash;
 }
 
@@ -161,28 +180,32 @@ struct TranspositionTable {
     
     ~TranspositionTable() { std::free(table); }
     
+    // Stores an entry in the transposition table with thread-safe locking
+    // Only updates if the new entry has greater or equal depth (replace strategy)
     void store(uint64_t key, int depth, int score, TTFlag flag, Move best_move) {
-        int index = key & (TT_SIZE - 1); 
-        int lock_idx = key & (LOCK_SIZE - 1); 
+        int index = key & (TT_SIZE - 1);              // Hash key to table index
+        int lock_idx = key & (LOCK_SIZE - 1);         // Hash key to lock index
         
-        locks[lock_idx].lock();
-        if (table[index].depth <= depth) { 
+        locks[lock_idx].lock();                        // Acquire lock for this entry
+        if (table[index].depth <= depth) {             // Only replace if new entry is deeper
             table[index] = {key, score, depth, flag, best_move};
         }
-        locks[lock_idx].unlock();
+        locks[lock_idx].unlock();                      // Release lock
     }
     
+    // Probes the transposition table for a cached position
+    // Returns true if a valid entry is found that can be used to cutoff search
     bool probe(uint64_t key, int depth, int alpha, int beta, int& out_score, Move& out_move) {
-        int index = key & (TT_SIZE - 1);
-        int lock_idx = key & (LOCK_SIZE - 1);
+        int index = key & (TT_SIZE - 1);              // Hash key to table index
+        int lock_idx = key & (LOCK_SIZE - 1);         // Hash key to lock index
         
-        locks[lock_idx].lock();
-        TTEntry entry = table[index];
-        locks[lock_idx].unlock();
+        locks[lock_idx].lock();                        // Acquire lock for this entry
+        TTEntry entry = table[index];                  // Read entry from table
+        locks[lock_idx].unlock();                      // Release lock immediately
         
-        if (entry.key == key) {
-            out_move = entry.best_move; 
-            if (entry.depth >= depth) {
+        if (entry.key == key) {                        // Verify hash collision didn't occur
+            out_move = entry.best_move;                // Always return best move if key matches
+            if (entry.depth >= depth) {                // Entry is deep enough to be useful
                 if (entry.flag == TTFlag::EXACT) { out_score = entry.score; return true; }
                 if (entry.flag == TTFlag::LOWERBOUND && entry.score >= beta) { out_score = entry.score; return true; }
                 if (entry.flag == TTFlag::UPPERBOUND && entry.score <= alpha) { out_score = entry.score; return true; }
@@ -244,10 +267,13 @@ MoveList get_legal_moves(const Board& board, char player) {
     MoveList moves;
     int empty_count = 64 - __builtin_popcountll(board.b | board.w);
     
+    // Handle opening moves: when board is full (empty_count == 0), black must pass from center squares
     if (empty_count == 0) {
         if (player == 'B') { moves.push_back({3, 3, 3, 3, false}); moves.push_back({4, 4, 4, 4, false}); }
         return moves;
-    } else if (empty_count == 1) {
+    } 
+    // Handle endgame: when only 1 empty square remains, white can only pass from allowed positions
+    else if (empty_count == 1) {
         if (player == 'W') {
             if (board.w & (1ULL << (3 * 8 + 4))) moves.push_back({3, 4, 3, 4, false}); 
             if (board.w & (1ULL << (4 * 8 + 3))) moves.push_back({4, 3, 4, 3, false}); 
@@ -353,30 +379,42 @@ int count_legal_moves(const Board& board, char player) {
 int evaluate_board(const Board& board, char player) {
     char opp = (player == 'B') ? 'W' : 'B';
     
+    // Count legal moves for both players to determine game state
     int my_moves = count_legal_moves(board, player);
     int opp_moves = count_legal_moves(board, opp);
     
-    // Increased terminal scores to 1,000,000 so they dominate PST scores
+    // Terminal positions: return high magnitude scores to dominate search decisions
+    // Winning (opponent has no moves) returns +1,000,000
+    // Losing (we have no moves) returns -1,000,000
     if (opp_moves == 0) return 1000000; 
     if (my_moves == 0) return -1000000;
     
+    // Mobility evaluation: difference in available moves
+    // Favors positions where we have more options than opponent
     int mobility_score = my_moves - opp_moves;
     
+    // Positional evaluation using piece-square table
+    // Board control: center squares valued higher, edge squares lower
     int positional_score = 0;
     uint64_t my_pieces = (player == 'B') ? board.b : board.w;
     uint64_t opp_pieces = (player == 'B') ? board.w : board.b;
     
+    // Add PST values for our pieces
     while (my_pieces) {
         int idx = __builtin_ctzll(my_pieces);
         positional_score += PIECE_SQUARE_TABLE[idx];
         my_pieces &= my_pieces - 1;
     }
+    
+    // Subtract PST values for opponent's pieces
     while (opp_pieces) {
         int idx = __builtin_ctzll(opp_pieces);
         positional_score -= PIECE_SQUARE_TABLE[idx];
         opp_pieces &= opp_pieces - 1;
     }
 
+    // Weighted combination: mobility (88%) + position control (12%)
+    // Genetically tuned weights for optimal play
     return (mobility_score * MOBILITY_WEIGHT) + (positional_score * POSITION_WEIGHT);
 }
 
@@ -527,6 +565,7 @@ Move get_best_move(const Board& board, char player, TranspositionTable& global_t
     MoveList legal_moves = get_legal_moves(board, player);
     if (legal_moves.empty()) return Move();
     
+    // Determine number of worker threads (capped at 4 for consistency)
     unsigned int num_cores = std::thread::hardware_concurrency();
     if (num_cores == 0) num_cores = 4; 
     num_cores = std::min(num_cores, 4u); 
@@ -541,7 +580,9 @@ Move get_best_move(const Board& board, char player, TranspositionTable& global_t
     std::vector<std::thread> workers;
     std::vector<Stats> thread_stats(num_cores);
 
+    // Lambda function executed by each worker thread performing iterative deepening search
     auto worker_thread = [&](int thread_id) {
+        // Pin thread to specific CPU core on Linux for cache locality
         #if defined(__linux__)
         cpu_set_t cpuset;
         CPU_ZERO(&cpuset);
@@ -565,11 +606,14 @@ Move get_best_move(const Board& board, char player, TranspositionTable& global_t
         std::mt19937 rng(12345 + thread_id); 
         char next_player = (player == 'B') ? 'W' : 'B';
         
+        // Killer moves heuristic: tracks good moves at each depth for move ordering
         int history[64][64] = {0}; 
         
         try {
             int depth = 1;
+            // Iterative deepening loop: increase depth until time runs out
             while (!time_out.load(std::memory_order_relaxed)) {
+                // Non-primary threads shuffle move order for diversity; thread 0 uses best-first ordering
                 if (thread_id > 0) std::shuffle(moves.begin(), moves.end(), rng);
                 
                 int alpha = -2e9;
@@ -577,6 +621,7 @@ Move get_best_move(const Board& board, char player, TranspositionTable& global_t
                 int alpha_orig = alpha;
                 int beta_orig = beta;
                 
+                // Aspiration window: narrow search window based on previous depth results for efficiency
                 bool use_window = (thread_id == 0 && depth >= 3 && !last_completed_evals.empty());
                 if (use_window) {
                     alpha = last_completed_evals[0].second - 500; // Widened window for weighted score jumps
@@ -585,12 +630,14 @@ Move get_best_move(const Board& board, char player, TranspositionTable& global_t
                     beta_orig = beta;
                 }
 
+                // Re-search with full window if aspiration window fails
                 while (true && !time_out.load(std::memory_order_relaxed)) {
                     int max_eval = -2e9;
                     Move current_best_move = moves[0];
                     std::vector<std::pair<Move, int>> current_scores;
                     int current_alpha = alpha;
                     
+                    // Evaluate each move at current depth via minimax
                     for (const auto& move : moves) {
                         Board new_board = board;
                         uint64_t new_hash = root_hash;
@@ -604,10 +651,12 @@ Move get_best_move(const Board& board, char player, TranspositionTable& global_t
                         current_alpha = std::max(current_alpha, score);
                     }
                     
+                    // If aspiration window failed, retry with full window
                     if (use_window && (max_eval <= alpha_orig || max_eval >= beta_orig) && !time_out.load(std::memory_order_relaxed)) {
                         alpha = -2e9; beta = 2e9; use_window = false; continue;
                     }
                     
+                    // Update best move and sort evaluated moves by score for next iteration
                     if (thread_id == 0) {
                         best_move = current_best_move;
                         std::sort(current_scores.begin(), current_scores.end(),[](const auto& a, const auto& b) { return a.second > b.second; });
@@ -627,6 +676,7 @@ Move get_best_move(const Board& board, char player, TranspositionTable& global_t
         thread_stats[thread_id] = local_stats;
     };
 
+    // Launch worker threads (thread 0 runs in main thread)
     for (unsigned int i = 1; i < num_cores; ++i) {
         workers.emplace_back(worker_thread, i);
     }
@@ -635,6 +685,7 @@ Move get_best_move(const Board& board, char player, TranspositionTable& global_t
         if (w.joinable()) w.join();
     }
     
+    // Aggregate statistics from all threads
     Stats global_stats;
     for (const auto& s : thread_stats) {
         global_stats.nodes_evaluated += s.nodes_evaluated;
@@ -644,6 +695,7 @@ Move get_best_move(const Board& board, char player, TranspositionTable& global_t
     
     double time_taken = get_elapsed(start_time);
         
+    // Print debug information if requested
     if (debug_thinking && !last_completed_evals.empty()) {
         std::cout << "\n[THOUGHT PROCESS (Depth " << last_completed_depth << ")]\n";
         std::cout << "   Active CPU Threads : " << num_cores << "\n";
@@ -737,7 +789,7 @@ int main(int argc, char* argv[]) {
     
     // Check for an instant win on Turn 1 (Rare, but possible in tiny boards)
     if (count_legal_moves(board, opp_colour) == 0) {
-        std::cerr << "\n🏆 Group D Wins! 🏆\n" << std::endl;
+        std::cerr << "\n Group D Wins! \n" << std::endl;
         return 0;
     }
 
