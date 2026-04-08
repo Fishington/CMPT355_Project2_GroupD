@@ -813,7 +813,7 @@ int main(int argc, char* argv[]) {
         // --- VICTORY CHECK ---
         
         if (count_legal_moves(board, opp_colour) == 0) {
-            std::cerr << "\n Group D Wins! 🏆\n" << std::endl;
+            std::cerr << "\n Group D Wins! \n" << std::endl;
             break;
         }
     }
