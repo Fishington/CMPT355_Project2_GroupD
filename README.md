@@ -37,15 +37,22 @@ This will result in a compiled version of our code called konane_GroupD
 
 ## How to Run
 
+### Our Program With the Driver
 ```bash
 
 perl drivercheck.pl PlayerA PlayerB
 
 ```
-
 Where Player A will play Black and Player B will play white.
 
 Replace either of the players with the konane_GroupD
+
+### Our Standalone Program 
+```bash
+./konane_GroupD <board_state file> <agent colour>
+```
+Where <board_state file> can be replaced with a file representing the game state
+Where <agent colour> can be either B (black) or W (white)
 
 ## Game Rules
 
