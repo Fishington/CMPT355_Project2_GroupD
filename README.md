@@ -52,6 +52,7 @@ Replace either of the players with the konane_GroupD
 ./konane_GroupD <board_state file> <agent colour>
 ```
 Where <board_state file> can be replaced with a file representing the game state
+
 Where <agent colour> can be either B (black) or W (white)
 
 ## Game Rules
