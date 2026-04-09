@@ -39,7 +39,7 @@ This will result in a compiled version of our code called konane_GroupD
 
 ```bash
 
-./drivercheck.pl  PlayerA  PlayerB
+perl drivercheck.pl PlayerA PlayerB
 
 ```
 
