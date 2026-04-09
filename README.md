@@ -49,7 +49,10 @@ Replace either of the players with the konane_GroupD
 
 ## Game Rules
 
-Konane is a two-player strategy game played on an 8×8 board. Players alternate removing opponent pieces by jumping over them, similar to checkers. The player who cannot move loses.
+Kōnane is a two-player strategy board game played on a 8x8 grid. One player controls the black pieces, while the other controls the white pieces. The objective of the game is to leave the opponent with no valid moves. When a player is unable to make a legal move on their turn, they lose the game, and their opponent is declared the winner.
+
+A valid move in Kōnane consists of a player “jumping” one of their pieces over an adjacent opponent’s piece, provided that the square immediately beyond the opponent’s piece, in the same direction of the jump, is empty. For example, in chess notation, if a player has a piece on square A5 and the opponent has a piece on A6, the player can jump over A6 and land on A7, only if A7 is unoccupied. The jumped piece is then removed from the board. This jumping mechanic is similar to that found in checkers; however, unlike checkers, Kōnane only allows jumps in four directions: up, down, left, and right, as diagonal moves are not permitted.
+
 
 ## Contributors
 
