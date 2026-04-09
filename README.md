@@ -49,11 +49,11 @@ Replace either of the players with the konane_GroupD
 
 ### Our Standalone Program 
 ```bash
-./konane_GroupD <board_state file> <agent colour>
+./konane_GroupD <board_state_file> <agent_colour>
 ```
-Where <board_state file> can be replaced with a file representing the game state
+Where board_state_file can be replaced with a file representing the game state
 
-Where <agent colour> can be either B (black) or W (white)
+Where agent_colour can be either B (black) or W (white)
 
 ## Game Rules
 
